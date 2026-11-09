@@ -5,6 +5,7 @@
 #     "urlextract>=1.10",
 #     "dnspython>=2.6",
 #     "tldextract>=5.1",
+#     "whoisit>=3.0",
 # ]
 # ///
 """
@@ -24,6 +25,10 @@ and hostnames -- the "addresses" of the Internet -- are understood.
                         registered domain to tell "domain does not exist" from "only the
                         hostname part is wrong". Also try adding/removing "www."
   Stage 5  HTTP       : reachability with requests (only for hosts that resolved)
+  Stage 6  RDAP        : for registered domains that are absent from DNS, query gTLD RDAP
+                        (whoisit) to tell "available for registration" from "still
+                        registered". TLDs without an RDAP endpoint (e.g. .jp) are reported
+                        as unsupported; we do NOT fall back to port-43 WHOIS
   Extra    Scheme     : for URLs without a scheme, try both http and https and record
                         which one is correct
 
@@ -35,13 +40,16 @@ Output (--outdir):
   access_denied_urls.csv 401/403/429 at stage 5 (server responded, so the address is
                          correct; with a WAF/CDN guess)
   scheme_completion.csv  http/https verdict for URLs without a scheme
+  rdap_domains.csv       RDAP registration status per DNS-absent registered domain
+                         (NOT for publication: it identifies takeable domains)
   hosts.csv              DNS result per unique hostname
-  summary.csv            per-file aggregates (counts and percentages)
+  summary.csv            per-file aggregates (counts and percentages); published, ASCII,
+                         English column names, no BOM
 
 Note: the input CSVs have Japanese column names, and the category labels written to
-the output CSVs (stage, dns_status, scheme_verdict, ...) are in Japanese. Column names
-of the output CSVs, including summary.csv, are in English.
+the row-level output CSVs (stage, dns_status, scheme_verdict, ...) are in Japanese.
 plot_results.R translates them to English for the figures (see EN_MAP there).
+summary.csv is written with English column names and facility types (SUMMARY_COLS_EN).
 
 Usage (uv provisions the dependencies from the PEP 723 metadata above):
   uv run check_urls.py
@@ -64,6 +72,8 @@ import dns.resolver
 import requests
 import tldextract
 import urllib3
+import whoisit
+import whoisit.errors as rdap_err
 from urlextract import URLExtract
 
 # File name -> (facility type, URL column, name column). The ID column is "ID" in every file.
@@ -76,9 +86,63 @@ FILES = {
     "05_pharmacy_20260601.csv": ("薬局", "薬局のホームページアドレス", "名称"),
 }
 ID_COL = "ID"
-# English facility type for summary.csv (same labels as KINDS$kind_en in plot_results.R)
-KIND_EN = {fn: {"病院": "Hospitals", "診療所": "Clinics", "歯科診療所": "Dental clinics",
-                "助産所": "Maternity homes", "薬局": "Pharmacies"}[kind] for fn, (kind, _, _) in FILES.items()}
+
+# summary.csv is published, so its column names and facility types are written in English.
+# (The row-level CSVs keep the Japanese category labels; see the module docstring.)
+KIND_EN = {"病院": "Hospitals", "診療所": "Clinics", "歯科診療所": "Dental clinics",
+           "助産所": "Maternity homes", "薬局": "Pharmacies", "合計": "Total"}
+SUMMARY_COLS_EN = {
+    "file": "file",
+    "種別": "facility_type",
+    "総行数": "total_rows",
+    "URL記載あり": "url_listed",
+    "URL記載あり 率%(全行中)": "url_listed_pct_of_all_rows",
+    "URL記載なし": "url_not_listed",
+    "URL記載なし 率%(全行中)": "url_not_listed_pct_of_all_rows",
+    "判定行数": "evaluated_rows",
+    # Metrics below are counts; each one's percentage column becomes "<metric>_pct" (denominator: evaluated_rows)
+    "URL構文 正規": "url_syntax_valid",
+    "URL構文 修正で救済": "url_syntax_repaired",
+    "URL構文 修正不能": "url_syntax_unrecoverable",
+    "スキーム欠落": "scheme_missing",
+    "スキーム誤記": "scheme_misspelled",
+    "ホスト名構文 問題あり": "hostname_syntax_issue",
+    "TLDが実在しない": "tld_nonexistent",
+    "DNS 解決可": "dns_resolved",
+    "DNS ドメインが存在しない": "dns_domain_not_exist",
+    "DNS ドメインは有るがホスト名が無い": "dns_domain_exists_hostname_not",
+    "DNS www付け外しで解決可": "dns_resolves_with_www_toggled",
+    "HTTP 到達可": "http_reachable",
+    "HTTP 自動アクセス拒否(応答あり)": "http_access_denied",
+    "HTTP 応答あり(到達可+拒否)": "http_responded",
+    "HTTP 到達不可(DNSは可)": "http_unreachable",
+    "スキーム補完 httpが正": "scheme_completion_http_correct",
+    "スキーム補完 httpsが正": "scheme_completion_https_correct",
+    # RDAP status of registered domains that are absent from DNS (denominator: evaluated_rows)
+    "RDAP 登録可能": "dns_absent_rdap_available",
+    "RDAP 登録済み": "dns_absent_rdap_registered",
+    "RDAP 削除償還保留": "dns_absent_rdap_pending_delete",
+    "RDAP 非対応TLD": "dns_absent_rdap_unsupported_tld",
+    "RDAP 照会不可": "dns_absent_rdap_error",
+    "総合OK(修正不要)": "overall_ok_no_correction",
+    "スキーム補完 httpsが正 率%(判定できた欠落URL中)": "scheme_completion_https_pct_of_determined",
+}
+
+
+def summary_to_english(s: dict) -> dict:
+    """Translate one summary row (Japanese keys and facility type) to English."""
+    out = {}
+    for k, v in s.items():
+        if k in SUMMARY_COLS_EN:
+            out[SUMMARY_COLS_EN[k]] = v
+        elif k.endswith(" 率%") and k[:-3] in SUMMARY_COLS_EN:
+            out[SUMMARY_COLS_EN[k[:-3]] + "_pct"] = v
+        else:
+            raise KeyError(f"no English name for summary column: {k}")
+    out["facility_type"] = KIND_EN.get(out["facility_type"], out["facility_type"])
+    if out["file"] == "合計":
+        out["file"] = "Total"
+    return out
 
 # Identify honestly as a research client; we never impersonate a browser.
 HEADERS = {
@@ -185,8 +249,9 @@ def validate(raw: str, extractor: URLExtract):
         out["problems"] = problems + ["ホスト名なし"]     # no hostname
         return out
     if guess_host and parts.hostname.lower() != guess_host:
-        # Partial extraction, e.g. uedaｰshiso.jp -> shiso.jp. That would check a
-        # different host, so the extraction is rejected.
+        # Partial extraction: when a full-width character splits the host, urlextract may
+        # return only a trailing part (e.g. "shiso.jp"). That would check a different host,
+        # so the extraction is rejected.
         out["problems"] = problems + [f"部分抽出のため不採用({parts.hostname})"]
         return out
     if "//" in parts.path:
@@ -336,6 +401,45 @@ def dns_check(host: str, reg: str):
     return res
 
 
+# ================================================================ Stage 6: RDAP
+# For a registered domain that is absent from DNS, RDAP tells "available for
+# registration" (the domain can be taken over) from "still registered". Only gTLDs
+# publish an RDAP endpoint in the IANA bootstrap; .jp and other ccTLDs that do not are
+# reported as unsupported and left unqueried, because their port-43 WHOIS restricts use
+# to network administration and we do not use it.
+_rdap_lock = threading.Lock()
+
+
+def rdap_bootstrap() -> None:
+    with _rdap_lock:
+        if not whoisit.is_bootstrapped():
+            whoisit.bootstrap()
+
+
+def rdap_check(domain: str):
+    """Returns (status label, detail) for one registered domain absent from DNS."""
+    if not domain:
+        return "RDAP照会不可", "no registered domain"
+    for attempt in range(3):
+        try:
+            r = whoisit.domain(domain, allow_insecure_ssl=True)
+            st = [str(s).lower() for s in (r.get("status") or [])]
+            if any("redemption" in s or "pending delete" in s for s in st):
+                return "登録済み（削除/償還保留）", f"status={st}"   # registered, pending delete/redemption
+            exp = r.get("expiration_date")
+            return "登録済み", (f"expires={exp.date()}" if exp else f"status={st}")   # still registered
+        except rdap_err.ResourceDoesNotExist:
+            return "登録可能（RDAPで未登録）", ""                 # available for registration (404)
+        except rdap_err.UnsupportedError:
+            return "RDAP非対応TLD", "no gTLD RDAP endpoint (e.g. .jp); WHOIS not used"
+        except rdap_err.RateLimitedError:
+            time.sleep(2 * (attempt + 1))
+            continue
+        except Exception as e:                                   # noqa: BLE001
+            return "RDAP照会不可", f"{type(e).__name__}: {str(e)[:120]}"
+    return "RDAP照会不可", "rate limited after retries"
+
+
 # ================================================================ Stage 5: HTTP
 def session() -> requests.Session:
     if not hasattr(_local, "s"):
@@ -348,22 +452,35 @@ def session() -> requests.Session:
     return _local.s
 
 
-_host_sem: dict = {}
-_host_sem_lock = threading.Lock()
-PER_HOST = 2                                    # concurrent connections per host (overridden in main)
+_ip_sem: dict = {}
+_ip_sem_lock = threading.Lock()
+PER_IP = 2                                       # concurrent connections per server IP (overridden in main)
+
+# hostname -> key identifying the server, set from the DNS stage before the HTTP stage.
+# The key is the sorted tuple of resolved A/AAAA addresses, so every hostname that
+# resolves to the same server shares one semaphore (e.g. many co-hosted sites on one IP).
+# Falls back to the hostname itself when no address is known.
+_server_key_of_host: dict = {}
 
 
-def host_slot(url: str) -> threading.Semaphore:
+def set_server_keys(dns_res: dict) -> None:
+    for h, d in dns_res.items():
+        addrs = (d.get("a", "") + " " + d.get("aaaa", "")).split()
+        _server_key_of_host[h] = tuple(sorted(addrs)) if addrs else ("host:" + h,)
+
+
+def ip_slot(url: str) -> threading.Semaphore:
     h = urlsplit(url).hostname or ""
-    with _host_sem_lock:
-        if h not in _host_sem:
-            _host_sem[h] = threading.Semaphore(PER_HOST)
-        return _host_sem[h]
+    key = _server_key_of_host.get(h) or ("host:" + h,)
+    with _ip_sem_lock:
+        if key not in _ip_sem:
+            _ip_sem[key] = threading.Semaphore(PER_IP)
+        return _ip_sem[key]
 
 
 def http_check(url: str, timeout: float):
-    """Check reachability while keeping concurrent requests to the same host at PER_HOST."""
-    with host_slot(url):
+    """Check reachability while keeping concurrent requests to the same server IP at PER_IP."""
+    with ip_slot(url):
         return _http_check(url, timeout)
 
 
@@ -489,11 +606,15 @@ def main():
     ap.add_argument("--outdir", default=".", help="folder for the output CSVs")
     ap.add_argument("--workers", type=int, default=32, help="number of parallel workers")
     ap.add_argument("--timeout", type=float, default=15, help="HTTP read timeout in seconds")
-    ap.add_argument("--per-host", type=int, default=2, help="concurrent connections per host")
+    ap.add_argument("--per-ip", "--per-host", dest="per_ip", type=int, default=2,
+                    help="concurrent connections per server IP (sorted set of resolved A/AAAA)")
+    ap.add_argument("--rdap-workers", type=int, default=8,
+                    help="parallel workers for the RDAP stage (kept low to respect registry rate limits)")
+    ap.add_argument("--no-rdap", action="store_true", help="skip the RDAP registration-availability stage")
     ap.add_argument("--limit", type=int, default=0, help="max hosts checked by DNS/HTTP (0 = all)")
     args = ap.parse_args()
-    global PER_HOST
-    PER_HOST = args.per_host
+    global PER_IP
+    PER_IP = args.per_ip
 
     extractor = URLExtract()
     tld = tldextract.TLDExtract()
@@ -532,6 +653,19 @@ def main():
     reg_of = {r["host"]: r["registered_domain"] for r in records}
     print(f"rows with URL: {len(records)}  unique hosts: {len(hosts)}", file=sys.stderr)
     dns_res = run_parallel(lambda h: dns_check(h, reg_of[h]), hosts, args.workers, "DNS")
+    set_server_keys(dns_res)   # group hostnames by resolved server IP for the HTTP concurrency limit
+
+    # ---- Stage 6: RDAP (registration status of registered domains absent from DNS)
+    absent_domains = sorted({reg_of[h] for h, d in dns_res.items()
+                             if d.get("dns_status") == "ドメインが存在しない" and reg_of.get(h)})
+    rdap_res = {}
+    if absent_domains and not args.no_rdap:
+        rdap_bootstrap()
+        print(f"DNS-absent registered domains to check via RDAP (gTLD only): {len(absent_domains)}",
+              file=sys.stderr)
+        rdap_res = run_parallel(rdap_check, absent_domains, args.rdap_workers, "RDAP")
+    rdap_of = {dom: rdap_res.get(dom, ("", ""))[0] for dom in absent_domains}
+    rdap_detail_of = {dom: rdap_res.get(dom, ("", ""))[1] for dom in absent_domains}
 
     # ---- Stage 5: HTTP (resolved hosts only; both http and https when the scheme is missing)
     urls = set()
@@ -557,6 +691,8 @@ def main():
         row = {k: v for k, v in r.items() if not k.startswith("_")}
         # not queried (invalid hostname syntax) / not queried (no hostname)
         row.update(d or {"dns_status": "未照会（ホスト名構文不正）" if r["host"] else "未照会（ホスト名なし）"})
+        row["rdap_status"] = rdap_of.get(r["registered_domain"], "")
+        row["rdap_detail"] = rdap_detail_of.get(r["registered_domain"], "")
         h = None
         if r["check_url"] and d and d["dns_status"] == "解決可":
             if r["scheme_state"] == "欠落":
@@ -565,7 +701,8 @@ def main():
                 scheme, verdict = scheme_verdict(hr, sr)
                 row.update(scheme_http=describe(hr), scheme_https=describe(sr),
                            scheme_correct=scheme, scheme_verdict=verdict,
-                           # ○ = completing with http was right; ×（httpsが正）= https was right
+                           # http_completion_ok marks whether prefixing http:// was the right
+                           # choice: "○" if http was correct, else the "https was correct" marker
                            http_completion_ok=("○" if scheme == "http" else "×（httpsが正）" if scheme == "https" else ""))
                 h = sr if scheme == "https" else hr
             else:
@@ -599,11 +736,14 @@ def main():
               "url_problems", "scheme_state",
               "host", "host_problems", "suffix", "registered_domain",
               "dns_status", "domain_status", "www_alt", "dns_detail", "a", "aaaa", "cname", "dns_note",
+              "rdap_status", "rdap_detail",
               "scheme_http", "scheme_https", "scheme_correct", "scheme_verdict", "http_completion_ok",
               "reachable", "status", "final_url", "http_error", "cert_ok", "denied", "waf"]
 
-    def w(name, fieldnames, data):
-        with open(f"{args.outdir}/{name}", "w", encoding="utf-8-sig", newline="") as f:
+    def w(name, fieldnames, data, bom=True):
+        # The row-level CSVs keep Japanese category labels, so they use utf-8-sig (BOM) for
+        # Excel. summary.csv is published, all-ASCII, and written without a BOM (bom=False).
+        with open(f"{args.outdir}/{name}", "w", encoding=("utf-8-sig" if bom else "utf-8"), newline="") as f:
             wr = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             wr.writeheader()
             wr.writerows(data)
@@ -616,64 +756,80 @@ def main():
       [r for r in rows if r.get("reachable") is False and not r.get("denied")])
     w("access_denied_urls.csv", fields, [r for r in rows if r.get("denied")])
     w("scheme_completion.csv", fields, [r for r in rows if r["scheme_state"] == "欠落"])
+    # RDAP registration status per DNS-absent registered domain, with the number of listed
+    # URLs pointing to it. NOT for publication: it identifies domains open to takeover.
+    fac_of_domain = Counter(r["registered_domain"] for r in rows
+                            if r.get("rdap_status") and r["registered_domain"])
+    w("rdap_domains.csv", ["registered_domain", "rdap_status", "rdap_detail", "listed_urls"],
+      [{"registered_domain": dom, "rdap_status": rdap_of.get(dom, ""),
+        "rdap_detail": rdap_detail_of.get(dom, ""), "listed_urls": fac_of_domain.get(dom, 0)}
+       for dom in absent_domains])
     w("hosts.csv", ["host", "registered_domain", "dns_status", "domain_status", "www_alt",
                     "dns_detail", "a", "aaaa", "cname", "dns_note"],
       [{"host": h, "registered_domain": reg_of[h], **d} for h, d in dns_res.items()])
 
-    # ---- Aggregates (per file + a "Total" row).
-    # summary.csv has English column names; plot_results.R reads total_rows and
-    # url_not_listed. "_pct" columns are percentages.
+    # ---- Aggregates (one row per file, plus a grand-total row).
+    # Built with Japanese keys and written to summary.csv with English column names
+    # (SUMMARY_COLS_EN); plot_results.R reads total_rows and url_not_listed.
     summary = []
-    for fn in list(FILES) + ["Total"]:
-        rs = [r for r in rows if fn == "Total" or r["file"] == fn]
-        n_rows = sum(v for (f, k), v in totals.items() if k == "rows" and fn in (f, "Total"))
-        n_empty = sum(v for (f, k), v in totals.items() if k == "empty" and fn in (f, "Total"))
+    for fn in list(FILES) + ["合計"]:
+        rs = [r for r in rows if fn == "合計" or r["file"] == fn]
+        n_rows = sum(v for (f, k), v in totals.items() if k == "rows" and fn in (f, "合計"))
+        n_empty = sum(v for (f, k), v in totals.items() if k == "empty" and fn in (f, "合計"))
         n_has = n_rows - n_empty
         n = len(rs) or 1
         c = Counter()
         for r in rs:
-            c["url_syntax_ok"] += not r["url_problems"]                              # no stage-1 problem
-            c["url_syntax_repaired"] += bool(r["url_problems"]) and bool(r["check_url"])  # rescued by repair
-            c["url_syntax_unrecoverable"] += not r["check_url"]                      # no usable URL
-            c["scheme_missing"] += r["scheme_state"] == "欠落"
-            c["scheme_misspelled"] += r["scheme_state"] == "誤記修正"
-            c["hostname_problem"] += bool(r["host_problems"])                        # any stage 2-3 issue
-            c["tld_nonexistent"] += "実在しないTLD" in r["host_problems"]
-            c["dns_resolved"] += r["dns_status"] == "解決可"
-            c["dns_domain_not_exist"] += r["dns_status"] == "ドメインが存在しない"
-            c["dns_domain_exists_hostname_not"] += "ホスト名部分が無い" in (r.get("domain_status") or "")
-            c["dns_resolves_with_www_toggled"] += bool(r.get("www_alt"))
-            c["http_reachable"] += r.get("reachable") is True
-            c["http_access_denied"] += bool(r.get("denied"))                         # 401/403/429
-            c["http_responded"] += r.get("reachable") is True or bool(r.get("denied"))  # reachable + denied
-            c["http_unreachable"] += r.get("reachable") is False and not r.get("denied")
-            c["scheme_completion_http"] += r.get("scheme_correct") == "http"
-            c["scheme_completion_https"] += r.get("scheme_correct") == "https"
-            c["overall_ok"] += r["stage"] == "OK"                                    # OK, no correction
+            c["URL構文 正規"] += not r["url_problems"]                               # URL syntax regular
+            c["URL構文 修正で救済"] += bool(r["url_problems"]) and bool(r["check_url"])  # rescued by repair
+            c["URL構文 修正不能"] += not r["check_url"]                              # unrecoverable
+            c["スキーム欠落"] += r["scheme_state"] == "欠落"                         # missing scheme
+            c["スキーム誤記"] += r["scheme_state"] == "誤記修正"                     # misspelled scheme
+            c["ホスト名構文 問題あり"] += bool(r["host_problems"])                   # hostname syntax issue
+            c["TLDが実在しない"] += "実在しないTLD" in r["host_problems"]            # nonexistent TLD
+            c["DNS 解決可"] += r["dns_status"] == "解決可"                           # DNS resolved
+            c["DNS ドメインが存在しない"] += r["dns_status"] == "ドメインが存在しない"   # domain does not exist
+            c["DNS ドメインは有るがホスト名が無い"] += "ホスト名部分が無い" in (r.get("domain_status") or "")
+            c["DNS www付け外しで解決可"] += bool(r.get("www_alt"))                   # resolves with www toggled
+            c["HTTP 到達可"] += r.get("reachable") is True                          # reachable
+            c["HTTP 自動アクセス拒否(応答あり)"] += bool(r.get("denied"))            # access denied
+            c["HTTP 応答あり(到達可+拒否)"] += r.get("reachable") is True or bool(r.get("denied"))
+            c["HTTP 到達不可(DNSは可)"] += r.get("reachable") is False and not r.get("denied")
+            c["スキーム補完 httpが正"] += r.get("scheme_correct") == "http"
+            c["スキーム補完 httpsが正"] += r.get("scheme_correct") == "https"
+            # RDAP status of DNS-absent registered domains (counted per listed URL)
+            c["RDAP 登録可能"] += r.get("rdap_status") == "登録可能（RDAPで未登録）"
+            c["RDAP 登録済み"] += r.get("rdap_status") == "登録済み"
+            c["RDAP 削除償還保留"] += r.get("rdap_status") == "登録済み（削除/償還保留）"
+            c["RDAP 非対応TLD"] += r.get("rdap_status") == "RDAP非対応TLD"
+            c["RDAP 照会不可"] += r.get("rdap_status") == "RDAP照会不可"
+            c["総合OK(修正不要)"] += r["stage"] == "OK"                              # OK, no correction
         # Listed / not listed use ALL rows as the denominator; every other metric uses the
         # number of evaluated rows (listed URLs that were checked).
-        s = {"file": fn, "facility_type": KIND_EN.get(fn, "Total"), "total_rows": n_rows,
-             "url_listed": n_has, "url_listed_pct_of_all_rows": round(n_has / (n_rows or 1) * 100, 2),
-             "url_not_listed": n_empty, "url_not_listed_pct_of_all_rows": round(n_empty / (n_rows or 1) * 100, 2),
-             "evaluated_rows": len(rs)}
+        s = {"file": fn, "種別": FILES[fn][0] if fn in FILES else "合計", "総行数": n_rows,
+             "URL記載あり": n_has, "URL記載あり 率%(全行中)": round(n_has / (n_rows or 1) * 100, 2),
+             "URL記載なし": n_empty, "URL記載なし 率%(全行中)": round(n_empty / (n_rows or 1) * 100, 2),
+             "判定行数": len(rs)}
         for k, v in c.items():
             s[k] = v
-            s[k + "_pct"] = round(v / n * 100, 2)
-        n_sm = c["scheme_completion_http"] + c["scheme_completion_https"]
-        s["scheme_completion_https_pct_of_determined"] = (
-            round(c["scheme_completion_https"] / n_sm * 100, 2) if n_sm else "")
+            s[k + " 率%"] = round(v / n * 100, 2)
+        n_sm = c["スキーム補完 httpが正"] + c["スキーム補完 httpsが正"]
+        s["スキーム補完 httpsが正 率%(判定できた欠落URL中)"] = round(c["スキーム補完 httpsが正"] / n_sm * 100, 2) if n_sm else ""
         summary.append(s)
-    w("summary.csv", list(summary[-1].keys()), summary)
+    summary_en = [summary_to_english(s) for s in summary]
+    w("summary.csv", list(summary_en[-1].keys()), summary_en, bom=False)
 
     for s in summary:
-        print(f"\n== {s['facility_type']}  {s['file']}", file=sys.stderr)
-        print(f"  {'total rows':<32} {s['total_rows']:>7}", file=sys.stderr)
-        print(f"  {'URL listed':<32} {s['url_listed']:>7}  ({s['url_listed_pct_of_all_rows']}% of all rows)", file=sys.stderr)
-        print(f"  {'no URL':<32} {s['url_not_listed']:>7}  ({s['url_not_listed_pct_of_all_rows']}% of all rows)", file=sys.stderr)
-        print(f"  --- below: denominator = {s['evaluated_rows']} evaluated rows", file=sys.stderr)
+        print(f"\n== {s['種別']}  {s['file']}", file=sys.stderr)
+        print(f"  {'total rows':<22} {s['総行数']:>7}", file=sys.stderr)
+        print(f"  {'URL listed':<22} {s['URL記載あり']:>7}  ({s['URL記載あり 率%(全行中)']}% of all rows)", file=sys.stderr)
+        print(f"  {'no URL':<22} {s['URL記載なし']:>7}  ({s['URL記載なし 率%(全行中)']}% of all rows)", file=sys.stderr)
+        print(f"  --- below: denominator = {s['判定行数']} evaluated rows", file=sys.stderr)
         for k, v in s.items():
-            if k.endswith("_pct"):
-                print(f"  {k[:-4]:<32} {s[k[:-4]]:>7}  ({v}%)", file=sys.stderr)
+            if "全行中" in k:
+                continue
+            if k.endswith("率%"):
+                print(f"  {k[:-3]:<22} {s[k[:-3]]:>7}  ({v}%)", file=sys.stderr)
 
 
 if __name__ == "__main__":
