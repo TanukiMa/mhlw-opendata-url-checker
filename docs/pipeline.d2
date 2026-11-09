@@ -1,0 +1,83 @@
+# Processing flow of check_urls.py
+# Render: d2 --layout elk --pad 20 docs/pipeline.d2 docs/pipeline.svg
+direction: down
+
+classes: {
+  step: {style: {fill: "#eef4fc"; stroke: "#2a78d6"; border-radius: 6; font-size: 15}}
+  decision: {shape: diamond; style: {fill: "#ffffff"; stroke: "#333333"; font-size: 14}}
+  ok: {style: {fill: "#e3f5ec"; stroke: "#1baf7a"; stroke-width: 2; bold: true; font-size: 15}}
+  warn: {style: {fill: "#fdf3dc"; stroke: "#eda100"; stroke-width: 2; bold: true; font-size: 15}}
+  fail: {style: {fill: "#fbe4e4"; stroke: "#e34948"; stroke-width: 2; bold: true; font-size: 15}}
+  file: {shape: page; style: {fill: "#f5f5f5"; stroke: "#666666"; font-size: 14}}
+  group: {style: {fill: "#fafafa"; stroke: "#999999"; stroke-dash: 3; font-size: 16; bold: true}}
+}
+
+input: "Input: 5 open-data CSVs (MHLW, 2026-06-01)\nhospitals · clinics · dental clinics · maternity homes · pharmacies" {class: file}
+
+s0: "Stage 0: Listing\nempty URL field → counted as \"No URL\" (denominator: all rows)" {class: step}
+nourl: "No URL\n(not validated further)" {
+  style: {fill: "#eeeeee"; stroke: "#999999"; font-size: 14}
+}
+
+local: "Stages 1–3: local processing, per row" {
+  class: group
+  s1: "Stage 1: URL syntax\nstrip whitespace · repair typos (http//, htpp://, duplicated scheme,\ncomma / double / leading / trailing dot) · extract with urlextract\nreject partial extraction · missing scheme → provisional http://" {class: step}
+  s2: "Stage 2: Hostname syntax (RFC 1123)\nIP literal · full-width / kana · IDNA · label ≤ 63 · host ≤ 253\nunderscore · leading / trailing hyphen · invalid characters" {class: step}
+  s3: "Stage 3: TLD (Public Suffix List, tldextract)\nnonexistent TLD · public suffix only · registered domain" {class: step}
+  s1 -> s2 -> s3
+}
+
+queryable: "Hostname\nqueryable?" {class: decision}
+nq_url: "Usable URL\nextracted?" {class: decision}
+syn_bad: "1-2 Invalid URL /\nhostname syntax" {class: fail}
+
+dns: "Stage 4: DNS, per unique hostname (dnspython)" {
+  class: group
+  a: "Resolve A / AAAA" {class: step}
+  resolved: "Resolved?" {class: decision}
+  diag: "Diagnose: NS of the registered domain\n(domain does not exist vs\ndomain exists, hostname does not)\n+ retry with www. added / removed" {class: step}
+  a -> resolved
+  resolved -> diag: no
+}
+dnsfail: "4 DNS failure" {class: fail}
+
+has_url: "Usable URL\nextracted?" {class: decision}
+url_bad: "1 Invalid URL syntax\n(DNS resolvable)" {class: fail}
+
+scheme: "Scheme\nmissing?" {class: decision}
+both: "Scheme completion\nrequest both http:// and https://\nchoose the correct one (valid certificate, redirect)" {class: step}
+
+http: "Stage 5: HTTP, per unique URL (requests)" {
+  class: group
+  req: "HEAD → GET (streamed) → GET without certificate verification\nfollow redirects · honest User-Agent · ≤ 2 connections per host" {class: step}
+  status: "Final\nstatus?" {class: decision}
+  req -> status
+}
+
+ok: "OK\n(OK after correction if a\nrepair / problem was recorded)" {class: ok}
+denied: "5' Server responded\n(access denied)" {class: warn}
+unreach: "5 HTTP unreachable" {class: fail}
+
+out: "Output CSVs (one row per listed URL, stage column = verdict)\nall_results · invalid_urls · hostname_problems · unreachable_urls\naccess_denied_urls · scheme_completion · hosts · summary" {class: file}
+
+input -> s0
+s0 -> nourl: empty
+s0 -> local.s1: URL listed
+local.s3 -> queryable
+queryable -> dns.a: yes
+queryable -> nq_url: no
+nq_url -> syn_bad: no
+nq_url -> dnsfail: "yes (not queried)"
+dns.diag -> dnsfail
+dns.resolved -> has_url: yes
+has_url -> url_bad: no
+has_url -> scheme: yes
+scheme -> both: yes
+scheme -> http.req: no
+both -> http.req
+http.status -> ok: "< 400"
+http.status -> denied: "401 / 403 / 429"
+http.status -> unreach: "other ≥ 400,\ntimeout, error"
+ok -> out: {style.stroke-dash: 3}
+denied -> out: {style.stroke-dash: 3}
+unreach -> out: {style.stroke-dash: 3}

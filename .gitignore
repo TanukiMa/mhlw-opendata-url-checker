@@ -1,0 +1,13 @@
+# Open data (not redistributed; see README "Input data")
+data/
+*.csv
+
+# Generated outputs
+results/
+figs/
+
+# Python / R
+__pycache__/
+.venv/
+.Rhistory
+.RData
