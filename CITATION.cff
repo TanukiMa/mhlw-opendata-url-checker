@@ -24,3 +24,10 @@ keywords:
   - open data
   - medical facilities
   - Japan
+references:
+  - type: data
+    title: "医療情報ネットのオープンデータ (Iryo Joho Net open data), as of 2026-06-01"
+    authors:
+      - name: "Ministry of Health, Labour and Welfare, Japan"
+    url: "https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/iryou/newpage_43373.html"
+    notes: "Used under the Public Data License version 1.0 (PDL1.0). Processed by the author."

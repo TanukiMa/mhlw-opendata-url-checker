@@ -82,8 +82,11 @@ install.packages(c("ggplot2", "svglite", "ragg", "systemfonts", "readr",
 ## Input data
 
 The open data is **not** redistributed in this repository. Download the facility files of the
-2026-06-01 release of the Japan Medical Information Net open data from the MHLW website and
-place them in one folder (e.g. `data/`):
+2026-06-01 release (「2026年６月１日時点」) from
+[医療情報ネットのオープンデータ](https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/iryou/newpage_43373.html)
+(MHLW). They are distributed as `.csv.zip`; unzip them into one folder (e.g. `data/`).
+The same page links the field definitions (オープンデータ定義書). The data is licensed under
+PDL1.0 (see [Source data attribution](#source-data-attribution)).
 
 | File | Facility type | URL column | Name column |
 |---|---|---|---|
@@ -310,12 +313,35 @@ the tables above and `EN_MAP` in `plot_results.R` give the English equivalents.
 | `cert_ok` | `False` if reachable only without certificate verification |
 | `denied`, `waf` | 401/403/429 flag and WAF/CDN guess |
 
-### Denominators in `summary.csv`
+### Columns of `summary.csv`
 
-- `URL記載あり` / `URL記載なし` (listed / not listed) and their `率%(全行中)` columns use **all rows**.
-- Every other `率%` column uses `判定行数`, the number of rows with a listed URL.
-- `スキーム補完 httpsが正 率%(判定できた欠落URL中)` uses only scheme-less URLs whose
-  scheme could be determined.
+One row per input file, plus a total row (`file` = `合計`). `facility_type` holds the
+Japanese facility type (病院 hospitals, 診療所 clinics, 歯科診療所 dental clinics,
+助産所 maternity homes, 薬局 pharmacies). Each count column `X` is followed by `X_pct`,
+a percentage rounded to two decimals.
+
+| Column | Count of rows where … | Denominator of `_pct` |
+|---|---|---|
+| `total_rows` | all facilities in the file | – |
+| `url_listed`, `url_not_listed` | the URL field is non-empty / empty | `total_rows` (`…_pct_of_all_rows`) |
+| `evaluated_rows` | a URL is listed and was evaluated | – |
+| `url_syntax_ok` | no stage-1 problem | `evaluated_rows` |
+| `url_syntax_repaired` | a stage-1 problem, but a usable URL after repair | `evaluated_rows` |
+| `url_syntax_unrecoverable` | no usable URL | `evaluated_rows` |
+| `scheme_missing`, `scheme_misspelled` | `scheme_state` is missing / misspelled | `evaluated_rows` |
+| `hostname_problem` | any stage 2–3 problem | `evaluated_rows` |
+| `tld_nonexistent` | the TLD is not in the Public Suffix List | `evaluated_rows` |
+| `dns_resolved` | the hostname resolved | `evaluated_rows` |
+| `dns_domain_not_exist` | neither the hostname nor its registered domain exists | `evaluated_rows` |
+| `dns_domain_exists_hostname_not` | the registered domain exists, the hostname does not | `evaluated_rows` |
+| `dns_resolves_with_www_toggled` | adding/removing `www.` would resolve | `evaluated_rows` |
+| `http_reachable` | final HTTP status < 400 | `evaluated_rows` |
+| `http_access_denied` | 401 / 403 / 429 | `evaluated_rows` |
+| `http_responded` | reachable or access denied | `evaluated_rows` |
+| `http_unreachable` | DNS resolved but no HTTP response other than access denied | `evaluated_rows` |
+| `scheme_completion_http`, `scheme_completion_https` | scheme-less URL whose correct scheme is http / https | `evaluated_rows` |
+| `overall_ok` | `stage` is `OK` (no correction needed) | `evaluated_rows` |
+| `scheme_completion_https_pct_of_determined` | (percentage only) https correct | scheme-less URLs whose scheme could be determined |
 
 ---
 
@@ -401,8 +427,20 @@ it is published. Until then, please cite the software (including `summary.csv`):
 Citation metadata is in [`CITATION.cff`](CITATION.cff); GitHub's **"Cite this repository"**
 button generates APA and BibTeX from it. Each release is archived on Zenodo with a DOI.
 
-Data source: Japan Medical Information Net open data (医療情報ネット オープンデータ),
-Ministry of Health, Labour and Welfare, release 2026-06-01.
+### Source data attribution
+
+This work uses the following data, under the
+[Public Data License version 1.0 (公共データ利用規約 第1.0版, PDL1.0)](https://www.digital.go.jp/resources/open_data/public_data_license_v1.0):
+
+> 「医療情報ネットのオープンデータ」（厚生労働省）（https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/iryou/newpage_43373.html）
+> 2026年6月1日時点のデータを加工して作成
+>
+> Created by processing "Iryo Joho Net open data" (Ministry of Health, Labour and Welfare),
+> data as of 2026-06-01.
+
+The results in this repository (`summary.csv`, the figures) were produced by the author by
+processing that data. They were not produced or endorsed by the Ministry of Health, Labour
+and Welfare.
 
 ---
 
@@ -410,13 +448,14 @@ Ministry of Health, Labour and Welfare, release 2026-06-01.
 
 - **Code** (`check_urls.py`, `plot_results.R`, `docs/`): [MIT License](LICENSE).
 - **Data** ([`summary.csv`](summary.csv)): [Creative Commons Attribution 4.0 International
-  (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/). When reusing it, please credit:
+  (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/); full text in
+  [`LICENSES/CC-BY-4.0.txt`](LICENSES/CC-BY-4.0.txt). When reusing it, please give both
+  credits:
 
-  > Tanuki Ma, *mhlw-opendata-url-checker* (`summary.csv`), https://github.com/TanukiMa/mhlw-opendata-url-checker, CC BY 4.0.
-  > Derived from 医療情報ネット オープンデータ (Japan Medical Information Net open data),
-  > Ministry of Health, Labour and Welfare, release 2026-06-01.
+  > Ma, T. (2026). *mhlw-opendata-url-checker* (`summary.csv`).
+  > https://github.com/TanukiMa/mhlw-opendata-url-checker. CC BY 4.0.
+  > 「医療情報ネットのオープンデータ」（厚生労働省）2026年6月1日時点のデータを加工して作成.
 
-  `summary.csv` is UTF-8 with BOM and has Japanese column names; see
-  [Denominators in `summary.csv`](#denominators-in-summarycsv) for their meaning.
+  See [Columns of `summary.csv`](#columns-of-summarycsv) for the meaning of each column.
 
-The input open data itself is subject to the MHLW terms of use and is not included here.
+The input open data itself is subject to PDL1.0 and is not included here.

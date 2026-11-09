@@ -39,7 +39,8 @@ Output (--outdir):
   summary.csv            per-file aggregates (counts and percentages)
 
 Note: the input CSVs have Japanese column names, and the category labels written to
-the output CSVs (stage, dns_status, scheme_verdict, ...) are in Japanese.
+the output CSVs (stage, dns_status, scheme_verdict, ...) are in Japanese. Column names
+of the output CSVs, including summary.csv, are in English.
 plot_results.R translates them to English for the figures (see EN_MAP there).
 
 Usage (uv provisions the dependencies from the PEP 723 metadata above):
@@ -617,8 +618,8 @@ def main():
       [{"host": h, "registered_domain": reg_of[h], **d} for h, d in dns_res.items()])
 
     # ---- Aggregates (per file + total "合計").
-    # summary.csv keeps Japanese column names; plot_results.R reads 総行数 (total rows)
-    # and URL記載なし (no URL listed).
+    # summary.csv has English column names; plot_results.R reads total_rows and
+    # url_not_listed. "_pct" columns are percentages.
     summary = []
     for fn in list(FILES) + ["合計"]:
         rs = [r for r in rows if fn == "合計" or r["file"] == fn]
@@ -628,49 +629,48 @@ def main():
         n = len(rs) or 1
         c = Counter()
         for r in rs:
-            c["URL構文 正規"] += not r["url_problems"]                               # URL syntax regular
-            c["URL構文 修正で救済"] += bool(r["url_problems"]) and bool(r["check_url"])  # rescued by repair
-            c["URL構文 修正不能"] += not r["check_url"]                              # unrecoverable
-            c["スキーム欠落"] += r["scheme_state"] == "欠落"                         # missing scheme
-            c["スキーム誤記"] += r["scheme_state"] == "誤記修正"                     # misspelled scheme
-            c["ホスト名構文 問題あり"] += bool(r["host_problems"])                   # hostname syntax issue
-            c["TLDが実在しない"] += "実在しないTLD" in r["host_problems"]            # nonexistent TLD
-            c["DNS 解決可"] += r["dns_status"] == "解決可"                           # DNS resolved
-            c["DNS ドメインが存在しない"] += r["dns_status"] == "ドメインが存在しない"   # domain does not exist
-            c["DNS ドメインは有るがホスト名が無い"] += "ホスト名部分が無い" in (r.get("domain_status") or "")
-            c["DNS www付け外しで解決可"] += bool(r.get("www_alt"))                   # resolves with www toggled
-            c["HTTP 到達可"] += r.get("reachable") is True                          # reachable
-            c["HTTP 自動アクセス拒否(応答あり)"] += bool(r.get("denied"))            # access denied
-            c["HTTP 応答あり(到達可+拒否)"] += r.get("reachable") is True or bool(r.get("denied"))
-            c["HTTP 到達不可(DNSは可)"] += r.get("reachable") is False and not r.get("denied")
-            c["スキーム補完 httpが正"] += r.get("scheme_correct") == "http"
-            c["スキーム補完 httpsが正"] += r.get("scheme_correct") == "https"
-            c["総合OK(修正不要)"] += r["stage"] == "OK"                              # OK, no correction
+            c["url_syntax_ok"] += not r["url_problems"]                              # no stage-1 problem
+            c["url_syntax_repaired"] += bool(r["url_problems"]) and bool(r["check_url"])  # rescued by repair
+            c["url_syntax_unrecoverable"] += not r["check_url"]                      # no usable URL
+            c["scheme_missing"] += r["scheme_state"] == "欠落"
+            c["scheme_misspelled"] += r["scheme_state"] == "誤記修正"
+            c["hostname_problem"] += bool(r["host_problems"])                        # any stage 2-3 issue
+            c["tld_nonexistent"] += "実在しないTLD" in r["host_problems"]
+            c["dns_resolved"] += r["dns_status"] == "解決可"
+            c["dns_domain_not_exist"] += r["dns_status"] == "ドメインが存在しない"
+            c["dns_domain_exists_hostname_not"] += "ホスト名部分が無い" in (r.get("domain_status") or "")
+            c["dns_resolves_with_www_toggled"] += bool(r.get("www_alt"))
+            c["http_reachable"] += r.get("reachable") is True
+            c["http_access_denied"] += bool(r.get("denied"))                         # 401/403/429
+            c["http_responded"] += r.get("reachable") is True or bool(r.get("denied"))  # reachable + denied
+            c["http_unreachable"] += r.get("reachable") is False and not r.get("denied")
+            c["scheme_completion_http"] += r.get("scheme_correct") == "http"
+            c["scheme_completion_https"] += r.get("scheme_correct") == "https"
+            c["overall_ok"] += r["stage"] == "OK"                                    # OK, no correction
         # Listed / not listed use ALL rows as the denominator; every other metric uses the
         # number of evaluated rows (listed URLs that were checked).
-        s = {"file": fn, "種別": FILES[fn][0] if fn in FILES else "合計", "総行数": n_rows,
-             "URL記載あり": n_has, "URL記載あり 率%(全行中)": round(n_has / (n_rows or 1) * 100, 2),
-             "URL記載なし": n_empty, "URL記載なし 率%(全行中)": round(n_empty / (n_rows or 1) * 100, 2),
-             "判定行数": len(rs)}
+        s = {"file": fn, "facility_type": FILES[fn][0] if fn in FILES else "合計", "total_rows": n_rows,
+             "url_listed": n_has, "url_listed_pct_of_all_rows": round(n_has / (n_rows or 1) * 100, 2),
+             "url_not_listed": n_empty, "url_not_listed_pct_of_all_rows": round(n_empty / (n_rows or 1) * 100, 2),
+             "evaluated_rows": len(rs)}
         for k, v in c.items():
             s[k] = v
-            s[k + " 率%"] = round(v / n * 100, 2)
-        n_sm = c["スキーム補完 httpが正"] + c["スキーム補完 httpsが正"]
-        s["スキーム補完 httpsが正 率%(判定できた欠落URL中)"] = round(c["スキーム補完 httpsが正"] / n_sm * 100, 2) if n_sm else ""
+            s[k + "_pct"] = round(v / n * 100, 2)
+        n_sm = c["scheme_completion_http"] + c["scheme_completion_https"]
+        s["scheme_completion_https_pct_of_determined"] = (
+            round(c["scheme_completion_https"] / n_sm * 100, 2) if n_sm else "")
         summary.append(s)
     w("summary.csv", list(summary[-1].keys()), summary)
 
     for s in summary:
-        print(f"\n== {s['種別']}  {s['file']}", file=sys.stderr)
-        print(f"  {'total rows':<22} {s['総行数']:>7}", file=sys.stderr)
-        print(f"  {'URL listed':<22} {s['URL記載あり']:>7}  ({s['URL記載あり 率%(全行中)']}% of all rows)", file=sys.stderr)
-        print(f"  {'no URL':<22} {s['URL記載なし']:>7}  ({s['URL記載なし 率%(全行中)']}% of all rows)", file=sys.stderr)
-        print(f"  --- below: denominator = {s['判定行数']} evaluated rows", file=sys.stderr)
+        print(f"\n== {s['facility_type']}  {s['file']}", file=sys.stderr)
+        print(f"  {'total rows':<32} {s['total_rows']:>7}", file=sys.stderr)
+        print(f"  {'URL listed':<32} {s['url_listed']:>7}  ({s['url_listed_pct_of_all_rows']}% of all rows)", file=sys.stderr)
+        print(f"  {'no URL':<32} {s['url_not_listed']:>7}  ({s['url_not_listed_pct_of_all_rows']}% of all rows)", file=sys.stderr)
+        print(f"  --- below: denominator = {s['evaluated_rows']} evaluated rows", file=sys.stderr)
         for k, v in s.items():
-            if "全行中" in k:
-                continue
-            if k.endswith("率%"):
-                print(f"  {k[:-3]:<22} {s[k[:-3]]:>7}  ({v}%)", file=sys.stderr)
+            if k.endswith("_pct"):
+                print(f"  {k[:-4]:<32} {s[k[:-4]]:>7}  ({v}%)", file=sys.stderr)
 
 
 if __name__ == "__main__":
