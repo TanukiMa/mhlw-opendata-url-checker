@@ -1,6 +1,5 @@
 # Open data (not redistributed; see README "Input data")
 data/
-*.csv
 
 # Generated outputs
 results/
