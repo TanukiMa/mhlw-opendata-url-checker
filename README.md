@@ -352,7 +352,7 @@ the code will therefore not reproduce the published numbers exactly. To support
 verification:
 
 - The results reported in the paper were obtained on **YYYY-MM-DD** from a network in
-  **[location / network type]** with Python **x.y**, requests **x.y**, urlextract **x.y**,
+  **[location / network type]** with Python **3.13**, requests **x.y**, urlextract **x.y**,
   dnspython **x.y**, tldextract **x.y**. *(fill in)*
 - The aggregated results used in the paper are published as [`summary.csv`](summary.csv)
   (CC BY 4.0, see [License](#license)).
@@ -392,17 +392,14 @@ verification:
 
 ## Citation
 
-If you use this code, please cite the paper:
+A paper describing this analysis is in preparation; its reference will be added here once
+it is published. Until then, please cite the software (including `summary.csv`):
 
-```bibtex
-@article{TODO,
-  author  = {TODO},
-  title   = {TODO},
-  journal = {TODO},
-  year    = {TODO},
-  doi     = {TODO}
-}
-```
+> Ma, T. (2026). *mhlw-opendata-url-checker* (Version 1.0.0) [Computer software].
+> https://github.com/TanukiMa/mhlw-opendata-url-checker
+
+Citation metadata is in [`CITATION.cff`](CITATION.cff); GitHub's **"Cite this repository"**
+button generates APA and BibTeX from it. Each release is archived on Zenodo with a DOI.
 
 Data source: Japan Medical Information Net open data (医療情報ネット オープンデータ),
 Ministry of Health, Labour and Welfare, release 2026-06-01.

@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software or summary.csv, please cite it as below."
+type: software
+title: "mhlw-opendata-url-checker: staged validation of website URLs in Japan's medical facility open data"
+version: 1.0.0
+date-released: "2026-11-10"
+authors:
+  - family-names: Ma
+    given-names: Tanuki
+repository-code: "https://github.com/TanukiMa/mhlw-opendata-url-checker"
+license: MIT
+abstract: >-
+  Staged validation (URL syntax, hostname syntax, TLD, DNS, HTTP reachability, and
+  http/https scheme completion) of the website URLs listed for hospitals, clinics,
+  dental clinics, maternity homes and pharmacies in the Japan Medical Information Net
+  open data (Ministry of Health, Labour and Welfare, release 2026-06-01). The share of
+  URLs failing at each stage is used as a proxy for how well domain names and hostnames
+  are understood. Includes the figure script and the aggregated results (summary.csv,
+  CC BY 4.0).
+keywords:
+  - domain names
+  - DNS
+  - URL validation
+  - open data
+  - medical facilities
+  - Japan
