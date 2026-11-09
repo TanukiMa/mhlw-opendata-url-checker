@@ -410,5 +410,8 @@ Ministry of Health, Labour and Welfare, release 2026-06-01.
 
 ## License
 
-TODO — choose a license (e.g. MIT) and add a `LICENSE` file. The open data itself is subject
-to the MHLW terms of use and is not included here.
+The code (`check_urls.py`, `plot_results.R`, `docs/`) is released under the
+[MIT License](LICENSE).
+
+The license covers the code only. The input open data is subject to the MHLW terms of use
+and is not included here.
