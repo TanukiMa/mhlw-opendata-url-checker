@@ -377,9 +377,14 @@ sites move, servers time out, and WAFs may treat clients differently by network.
 the code will therefore not reproduce the published numbers exactly. To support
 verification:
 
-- The results reported in the paper were obtained on **YYYY-MM-DD** from a network in
-  **[location / network type]** with Python **3.13**, requests **x.y**, urlextract **x.y**,
-  dnspython **x.y**, tldextract **x.y**. *(fill in)*
+- The results reported in the paper were obtained on **2026-11-09** from a residential FTTH
+  (fibre-to-the-home) connection in **Japan**, with Python 3.13, requests 2.34.2,
+  urlextract 1.10.0, dnspython 2.9.2 and tldextract 5.4.0. To reproduce with the same versions:
+
+  ```sh
+  uv run --python 3.13 --with requests==2.34.2 --with urlextract==1.10.0 \
+         --with dnspython==2.9.2 --with tldextract==5.4.0 check_urls.py --dir data --outdir results
+  ```
 - The aggregated results used in the paper are published as [`summary.csv`](summary.csv)
   (CC BY 4.0, see [License](#license)).
 - `tldextract` downloads the current Public Suffix List on first use and caches it (falling
