@@ -354,7 +354,8 @@ verification:
 - The results reported in the paper were obtained on **YYYY-MM-DD** from a network in
   **[location / network type]** with Python **x.y**, requests **x.y**, urlextract **x.y**,
   dnspython **x.y**, tldextract **x.y**. *(fill in)*
-- The result CSVs used in the paper are available at **[DOI / URL]**. *(fill in)*
+- The aggregated results used in the paper are published as [`summary.csv`](summary.csv)
+  (CC BY 4.0, see [License](#license)).
 - `tldextract` downloads the current Public Suffix List on first use and caches it (falling
   back to its bundled snapshot when offline); the PSL version can therefore differ between runs.
 - DNS uses the operating system's resolver configuration, so results can be affected by the
@@ -410,8 +411,15 @@ Ministry of Health, Labour and Welfare, release 2026-06-01.
 
 ## License
 
-The code (`check_urls.py`, `plot_results.R`, `docs/`) is released under the
-[MIT License](LICENSE).
+- **Code** (`check_urls.py`, `plot_results.R`, `docs/`): [MIT License](LICENSE).
+- **Data** ([`summary.csv`](summary.csv)): [Creative Commons Attribution 4.0 International
+  (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/). When reusing it, please credit:
 
-The license covers the code only. The input open data is subject to the MHLW terms of use
-and is not included here.
+  > Tanuki Ma, *mhlw-opendata-url-checker* (`summary.csv`), https://github.com/TanukiMa/mhlw-opendata-url-checker, CC BY 4.0.
+  > Derived from 医療情報ネット オープンデータ (Japan Medical Information Net open data),
+  > Ministry of Health, Labour and Welfare, release 2026-06-01.
+
+  `summary.csv` is UTF-8 with BOM and has Japanese column names; see
+  [Denominators in `summary.csv`](#denominators-in-summarycsv) for their meaning.
+
+The input open data itself is subject to the MHLW terms of use and is not included here.
