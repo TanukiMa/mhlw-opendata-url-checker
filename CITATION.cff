@@ -7,6 +7,14 @@ date-released: "2026-11-10"
 authors:
   - family-names: Ma
     given-names: Tanuki
+doi: "10.5281/zenodo.24087179"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.24087179"
+    description: "Concept DOI (all versions, resolves to the latest)"
+  - type: doi
+    value: "10.5281/zenodo.24087180"
+    description: "Version 1.0.0"
 repository-code: "https://github.com/TanukiMa/mhlw-opendata-url-checker"
 license: MIT
 abstract: >-

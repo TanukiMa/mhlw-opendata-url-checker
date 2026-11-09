@@ -1,5 +1,9 @@
 # mhlw-opendata-url-checker
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24087179.svg)](https://doi.org/10.5281/zenodo.24087179)
+[![Code license: MIT](https://img.shields.io/badge/code%20license-MIT-blue.svg)](LICENSE)
+[![Data license: CC BY 4.0](https://img.shields.io/badge/data%20license-CC%20BY%204.0-lightgrey.svg)](LICENSES/CC-BY-4.0.txt)
+
 Staged validation of the website URLs listed in Japan's medical facility open data
 (Japan Medical Information Net / 医療情報ネット, Ministry of Health, Labour and Welfare).
 The share of URLs that fail at each stage — URL syntax, hostname syntax, TLD, DNS, HTTP —
@@ -284,7 +288,7 @@ the tables above and `EN_MAP` in `plot_results.R` give the English equivalents.
 | `access_denied_urls.csv` | 401 / 403 / 429, with the WAF/CDN guess |
 | `scheme_completion.csv` | Rows listed without a scheme, with the http/https verdict |
 | `hosts.csv` | DNS result per unique hostname |
-| `summary.csv` | Counts and percentages per file and in total (`合計`) |
+| `summary.csv` | Counts and percentages per file and in total (`Total`) |
 
 ### Columns of the row-level CSVs
 
@@ -315,9 +319,9 @@ the tables above and `EN_MAP` in `plot_results.R` give the English equivalents.
 
 ### Columns of `summary.csv`
 
-One row per input file, plus a total row (`file` = `合計`). `facility_type` holds the
-Japanese facility type (病院 hospitals, 診療所 clinics, 歯科診療所 dental clinics,
-助産所 maternity homes, 薬局 pharmacies). Each count column `X` is followed by `X_pct`,
+One row per input file, plus a total row (`file` = `Total`). `facility_type` is one of
+`Hospitals` (病院), `Clinics` (診療所), `Dental clinics` (歯科診療所), `Maternity homes`
+(助産所), `Pharmacies` (薬局) or `Total`. Each count column `X` is followed by `X_pct`,
 a percentage rounded to two decimals.
 
 | Column | Count of rows where … | Denominator of `_pct` |
@@ -426,11 +430,16 @@ verification:
 A paper describing this analysis is in preparation; its reference will be added here once
 it is published. Until then, please cite the software (including `summary.csv`):
 
-> Ma, T. (2026). *mhlw-opendata-url-checker* (Version 1.0.0) [Computer software].
-> https://github.com/TanukiMa/mhlw-opendata-url-checker
+> Ma, T. (2026). *mhlw-opendata-url-checker* [Computer software]. Zenodo.
+> https://doi.org/10.5281/zenodo.24087179
+
+This DOI always resolves to the latest version. Each release also has its own DOI; to cite
+the exact version you used, take it from the version list on the
+[Zenodo record](https://doi.org/10.5281/zenodo.24087179)
+(v1.0.0: [10.5281/zenodo.24087180](https://doi.org/10.5281/zenodo.24087180)).
 
 Citation metadata is in [`CITATION.cff`](CITATION.cff); GitHub's **"Cite this repository"**
-button generates APA and BibTeX from it. Each release is archived on Zenodo with a DOI.
+button generates APA and BibTeX from it.
 
 ### Source data attribution
 

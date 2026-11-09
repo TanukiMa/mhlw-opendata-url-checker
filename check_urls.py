@@ -76,6 +76,9 @@ FILES = {
     "05_pharmacy_20260601.csv": ("薬局", "薬局のホームページアドレス", "名称"),
 }
 ID_COL = "ID"
+# English facility type for summary.csv (same labels as KINDS$kind_en in plot_results.R)
+KIND_EN = {fn: {"病院": "Hospitals", "診療所": "Clinics", "歯科診療所": "Dental clinics",
+                "助産所": "Maternity homes", "薬局": "Pharmacies"}[kind] for fn, (kind, _, _) in FILES.items()}
 
 # Identify honestly as a research client; we never impersonate a browser.
 HEADERS = {
@@ -617,14 +620,14 @@ def main():
                     "dns_detail", "a", "aaaa", "cname", "dns_note"],
       [{"host": h, "registered_domain": reg_of[h], **d} for h, d in dns_res.items()])
 
-    # ---- Aggregates (per file + total "合計").
+    # ---- Aggregates (per file + a "Total" row).
     # summary.csv has English column names; plot_results.R reads total_rows and
     # url_not_listed. "_pct" columns are percentages.
     summary = []
-    for fn in list(FILES) + ["合計"]:
-        rs = [r for r in rows if fn == "合計" or r["file"] == fn]
-        n_rows = sum(v for (f, k), v in totals.items() if k == "rows" and fn in (f, "合計"))
-        n_empty = sum(v for (f, k), v in totals.items() if k == "empty" and fn in (f, "合計"))
+    for fn in list(FILES) + ["Total"]:
+        rs = [r for r in rows if fn == "Total" or r["file"] == fn]
+        n_rows = sum(v for (f, k), v in totals.items() if k == "rows" and fn in (f, "Total"))
+        n_empty = sum(v for (f, k), v in totals.items() if k == "empty" and fn in (f, "Total"))
         n_has = n_rows - n_empty
         n = len(rs) or 1
         c = Counter()
@@ -649,7 +652,7 @@ def main():
             c["overall_ok"] += r["stage"] == "OK"                                    # OK, no correction
         # Listed / not listed use ALL rows as the denominator; every other metric uses the
         # number of evaluated rows (listed URLs that were checked).
-        s = {"file": fn, "facility_type": FILES[fn][0] if fn in FILES else "合計", "total_rows": n_rows,
+        s = {"file": fn, "facility_type": KIND_EN.get(fn, "Total"), "total_rows": n_rows,
              "url_listed": n_has, "url_listed_pct_of_all_rows": round(n_has / (n_rows or 1) * 100, 2),
              "url_not_listed": n_empty, "url_not_listed_pct_of_all_rows": round(n_empty / (n_rows or 1) * 100, 2),
              "evaluated_rows": len(rs)}
