@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this software or summary.csv, please cite it as below."
 type: software
 title: "mhlw-opendata-url-checker: staged validation of website URLs in Japan's medical facility open data"
-version: 1.0.0
+version: 1.0.1
 date-released: "2026-11-10"
 authors:
   - family-names: Ma
