@@ -1,0 +1,95 @@
+# Flow of check_urls.py (staged URL validation).
+# Render (from this folder):
+#   d2 --layout elk --pad 16 --elk-nodeNodeBetweenLayers 28 --elk-edgeNodeBetweenLayers 14 \
+#      check_urls_flow.d2 check_urls_flow.svg
+# The decision order mirrors the overall classification in check_urls.py (main(), "Overall verdict").
+# Monochrome so that it prints in greyscale; outcome boxes match the categories of Figure 2/Table 2.
+# The lower tier is the secondary analysis of DNS failures (RDAP registrability and dangling-
+# CNAME subdomain takeover); black boxes mark an address open to takeover.
+
+direction: down
+
+# All connections in black (D2's default theme draws them in blue)
+(** -> **)[*].style.stroke: "#000000"
+(** -> **)[*].style.font-color: "#333333"
+
+classes: {
+  step: {
+    style: {fill: "#ffffff"; stroke: "#000000"; stroke-width: 2; font-size: 15; font-color: "#000000"}
+  }
+  decision: {
+    shape: diamond
+    style: {fill: "#ffffff"; stroke: "#000000"; stroke-width: 2; font-size: 14; font-color: "#000000"}
+  }
+  outcome: {
+    style: {fill: "#d9d9d9"; stroke: "#000000"; stroke-width: 2; border-radius: 10; font-size: 15; font-color: "#000000"}
+  }
+  ok: {
+    style: {fill: "#4d4d4d"; stroke: "#000000"; stroke-width: 2; border-radius: 10; font-size: 15; font-color: "#ffffff"}
+  }
+  risk: {
+    style: {fill: "#000000"; stroke: "#000000"; stroke-width: 2; border-radius: 10; font-size: 15; font-color: "#ffffff"}
+  }
+}
+
+input: "MHLW open data (June 1, 2026)\n5 CSV files: 206,043 facilities" {class: step}
+listed: "URL\nlisted?" {class: decision}
+nourl: "No URL" {class: outcome}
+
+s13: "Stages 1-3: URL syntax, hostname, TLD\n1. Remove whitespace; repair common errors (scheme typos, duplicated\n    scheme, commas, consecutive or stray dots); extract URL (urlextract)\n2. RFC 1123 label syntax; IDNA conversion\n3. Public suffix and registered domain (Public Suffix List)" {class: step}
+q_host: "Hostname\nqueryable?" {class: decision}
+o_syntax: "Invalid URL/\nhostname syntax" {class: outcome}
+
+s4: "Stage 4: DNS (dnspython)\nA and AAAA records; on NXDOMAIN, NS of the registered domain\n(domain does not exist vs hostname does not exist)" {class: step}
+q_dns: "Resolved?" {class: decision}
+o_dns: "DNS resolution\nfailure" {class: outcome}
+
+q_url: "URL\nextracted?" {class: decision}
+o_syn2: "Invalid URL syntax\n(DNS resolvable)" {class: outcome}
+
+s5: "Stage 5: HTTP (requests)\nHEAD, then GET, then GET without certificate verification;\nredirects followed; at most 2 connections per host.\nScheme missing: both http:// and https:// tested" {class: step}
+q_status: "Final\nstatus" {class: decision}
+
+o_ok: "OK" {class: ok}
+o_okc: "OK after\ncorrection" {class: ok}
+o_denied: "Server responded,\naccess denied" {class: outcome}
+o_unr: "HTTP\nunreachable" {class: outcome}
+
+input -> listed
+listed -> nourl: "No"
+listed -> s13: "Yes"
+s13 -> q_host
+q_host -> o_syntax: "No"
+q_host -> s4: "Yes"
+s4 -> q_dns
+q_dns -> o_dns: "No"
+q_dns -> q_url: "Yes"
+q_url -> o_syn2: "No"
+q_url -> s5: "Yes"
+s5 -> q_status
+q_status -> o_ok: "<400"
+q_status -> o_okc: "<400\n(repaired)"
+q_status -> o_denied: "401, 403,\n429"
+q_status -> o_unr: "Other status\nor error"
+
+# ---- Secondary analysis of DNS resolution failures (not part of the Table 2 / Figure 2
+# categories): is the listed address open to takeover? Black boxes mark a takeover risk.
+q_fail: "Failure\ntype" {class: decision}
+s6: "Stage 6: RDAP (whoisit)\ngTLD registration status of the absent domain" {class: step}
+q_rdap: "Registry\nrecord?" {class: decision}
+o_avail: "Domain available\nfor registration" {class: risk}
+o_pend: "Pending delete /\nredemption" {class: outcome}
+o_reg: "Still registered\n(DNS misconfigured)" {class: outcome}
+q_cname: "Dangling CNAME to a\nhosting provider\n(target NXDOMAIN)?" {class: decision}
+o_sto: "Subdomain-takeover\ncandidate" {class: risk}
+o_gone: "Hostname gone\n(no dangling CNAME)" {class: outcome}
+
+o_dns -> q_fail
+q_fail -> s6: "Registered\ndomain absent"
+q_fail -> q_cname: "Hostname absent,\nparent survives"
+s6 -> q_rdap
+q_rdap -> o_avail: "404"
+q_rdap -> o_pend: "Pending\ndelete"
+q_rdap -> o_reg: "Active"
+q_cname -> o_sto: "Yes"
+q_cname -> o_gone: "No"

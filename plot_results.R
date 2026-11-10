@@ -126,14 +126,14 @@ res <- read_csv(file.path(in_dir, "all_results.csv"), col_types = cols(.default 
   select(-any_of(c("kind", "code"))) |> inner_join(KINDS, by = "file")
 smy <- read_csv(file.path(in_dir, "summary.csv"), col_types = cols(.default = col_character()),
                 na = character(), progress = FALSE)
-# summary.csv columns: total_rows, url_not_listed. Older versions of check_urls.py wrote
-# Japanese names (総行数, URL記載なし or URL空白), which are still accepted.
-first_col <- function(df, cands) df[[intersect(cands, names(df))[1]]]
+# summary.csv uses English column names (total_rows, url_not_listed). Older versions of
+# check_urls.py wrote Japanese names: 総行数 = total rows, URL記載なし (or URL空白) = no URL.
+smy_cols <- names(smy)
 smy <- smy |> filter(file %in% KINDS$file) |>
-  select(-any_of(c("kind", "code", "種別", "facility_type"))) |> inner_join(KINDS, by = "file")
-smy <- smy |>
-  mutate(total = as.integer(first_col(smy, c("total_rows", "総行数"))),
-         none  = as.integer(first_col(smy, c("url_not_listed", "URL記載なし", "URL空白"))),
+  select(-any_of(c("kind", "code", "種別", "facility_type"))) |> inner_join(KINDS, by = "file") |>
+  mutate(total = as.integer(if ("total_rows" %in% smy_cols) total_rows else 総行数),
+         none  = as.integer(if ("url_not_listed" %in% smy_cols) url_not_listed
+                            else if ("URL記載なし" %in% smy_cols) URL記載なし else URL空白),
          has   = total - none)
 kinds_present <- KINDS |> filter(file %in% res$file)
 
@@ -178,9 +178,8 @@ render <- function(LANG, MODE) {
     ifelse(is.na(hit), x, hit)
   }
   kname <- function(k) if (LANG == "ja") k$kind else k$kind_en
-  # Attribution in the form required by MHLW for processed data (PDL1.0)
-  CAPTION <- L("「医療情報ネットのオープンデータ」（厚生労働省）2026年6月1日時点のデータを加工して作成",
-               "Created by processing \"Iryo Joho Net open data\" (MHLW), as of 2026-06-01")
+  CAPTION <- L("出典: 医療情報ネット オープンデータ（2026-06-01）",
+               "Source: Japan Medical Information Net open data (2026-06-01)")
 
   theme_base <- function() {
     theme_minimal(base_family = JP, base_size = 10) +

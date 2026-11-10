@@ -17,14 +17,19 @@ readers can inspect and re-run the analysis.
 |---|---|
 | [`check_urls.py`](check_urls.py) | Reads the open data CSVs, validates every listed URL in stages, writes result CSVs |
 | [`plot_results.R`](plot_results.R) | Draws the figures (colour / monochrome × English / Japanese) from those CSVs |
-| [`docs/pipeline.d2`](docs/pipeline.d2), [`docs/pipeline.svg`](docs/pipeline.svg) | Processing-flow diagram of `check_urls.py` ([D2](https://d2lang.com/) source and rendered SVG) |
+| [`subdomain_takeover_supplement.py`](subdomain_takeover_supplement.py) | Adds the subdomain-takeover check to the output of an earlier run, without re-measuring |
+| [`docs/check_urls_flow.d2`](docs/check_urls_flow.d2), [`docs/check_urls_flow.svg`](docs/check_urls_flow.svg) | Processing-flow diagram of `check_urls.py` ([D2](https://d2lang.com/) source and rendered SVG) |
+| [`summary.csv`](summary.csv) | Aggregated results used in the paper (CC BY 4.0) |
 
 > **日本語の概要**
 > 医療情報ネット（厚生労働省）のオープンデータに掲載された病院・診療所・歯科診療所・助産所・薬局の
 > ホームページアドレスを、URL構文 → ホスト名構文 → TLD → DNS → HTTP の順に段階的に検証し、
-> どの段階で問題が生じたかを集計するコードです。`check_urls.py` が検証と集計を、
+> どの段階で問題が生じたかを集計するコードです。DNS で解決できなかったものについては、
+> 登録ドメインが第三者に取得可能か（RDAP）と、サブドメインテイクオーバーの候補か
+> （ホスティング事業者を指したまま残った CNAME）も調べます。`check_urls.py` が検証と集計を、
 > `plot_results.R` が論文用の図（カラー／モノクロ、英語版／日本語版）を作成します。
-> 出力CSVのカテゴリ名は日本語で、図の英語版では `plot_results.R` の `EN_MAP` で英訳しています。
+> 行単位の出力CSVのカテゴリ名は日本語で、図の英語版では `plot_results.R` の `EN_MAP` で英訳しています。
+> 公開している `summary.csv` は列名・値とも英語です。
 
 ---
 
@@ -49,7 +54,8 @@ readers can inspect and re-run the analysis.
 ### Python (`check_urls.py`)
 
 - Python ≥ 3.10
-- `requests` ≥ 2.32, `urlextract` ≥ 1.10, `dnspython` ≥ 2.6, `tldextract` ≥ 5.1
+- `requests` ≥ 2.32, `urlextract` ≥ 1.10, `dnspython` ≥ 2.6, `tldextract` ≥ 5.1,
+  `whoisit` ≥ 3.0 (RDAP)
 
 The dependencies are declared inline ([PEP 723](https://peps.python.org/pep-0723/)), so
 [uv](https://docs.astral.sh/uv/) installs them automatically:
@@ -61,11 +67,11 @@ uv run check_urls.py --help
 Without uv:
 
 ```sh
-pip install "requests>=2.32" "urlextract>=1.10" "dnspython>=2.6" "tldextract>=5.1"
+pip install "requests>=2.32" "urlextract>=1.10" "dnspython>=2.6" "tldextract>=5.1" "whoisit>=3.0"
 python check_urls.py --help
 ```
 
-Network access (DNS and HTTP/HTTPS) is required.
+Network access (DNS, HTTP/HTTPS and RDAP) is required.
 
 ### R (`plot_results.R`)
 
@@ -116,6 +122,10 @@ Rscript plot_results.R results figs                  # figures
 `--outdir` must already exist. For a quick test, `--limit 300` restricts DNS/HTTP to the
 first 300 unique hostnames (rows on other hosts are then omitted from the output).
 
+All results are kept in memory and written at the end. If writing to `--outdir` keeps failing
+(e.g. on a cloud-synced folder such as Google Drive), the script retries and finally saves the
+files to `check_urls_out` in the system temp folder, printing that path, so a long run is not lost.
+
 ### `check_urls.py` options
 
 | Option | Default | Meaning |
@@ -124,8 +134,25 @@ first 300 unique hostnames (rows on other hosts are then omitted from the output
 | `--outdir` | `.` | Folder for the output CSVs (must exist) |
 | `--workers` | `32` | Number of parallel threads for DNS and HTTP |
 | `--timeout` | `15` | HTTP read timeout in seconds (connect timeout = min(timeout, 5)) |
-| `--per-host` | `2` | Maximum concurrent HTTP connections to one hostname |
+| `--per-ip` (alias `--per-host`) | `2` | Maximum concurrent HTTP connections to one server (hostnames resolving to the same set of A/AAAA addresses share the limit) |
+| `--rdap-workers` | `8` | Parallel workers for the RDAP stage (kept low for registry rate limits) |
+| `--no-rdap` | – | Skip the RDAP stage |
 | `--limit` | `0` | Maximum number of hostnames checked by DNS/HTTP (0 = all) |
+
+### `subdomain_takeover_supplement.py`
+
+For a run made before the dangling-CNAME check was added to `check_urls.py`, this script adds
+that check without re-running the measurement:
+
+```sh
+uv run subdomain_takeover_supplement.py --outdir results
+```
+
+It reads `results/hosts.csv`, takes the hostnames that no longer resolve while their registered
+domain still exists, applies the same check as Stage 4 (it imports `check_urls.py`, so run it
+from the repository folder), and writes `results/subdomain_takeover.csv`. It makes DNS queries
+only (no HTTP) and does not change the other result files. A full run of the current
+`check_urls.py` already includes this check.
 
 ### `plot_results.R` arguments
 
@@ -150,18 +177,22 @@ hostname, HTTP once per unique URL.
 
 ### Processing flow
 
-Each listed URL ends in exactly one overall verdict (the `stage` column; red, amber and green
-boxes). The verdicts are explained in [Overall verdict](#overall-verdict-stage).
+Each listed URL ends in exactly one overall verdict (the `stage` column; grey and dark grey
+boxes), explained in [Overall verdict](#overall-verdict-stage). The lower left part is the
+secondary analysis of DNS failures (Stage 6 and the subdomain-takeover check); black boxes
+mark an address that a third party could take over.
 
 <p align="center">
-  <img src="docs/pipeline.svg" alt="Processing flow of check_urls.py: input CSVs, stage 0 listing, stages 1–3 local URL/hostname/TLD checks, stage 4 DNS, scheme completion, stage 5 HTTP, and the overall verdicts" width="640">
+  <img src="docs/check_urls_flow.svg" alt="Processing flow of check_urls.py: URL listed, stages 1–3 URL/hostname/TLD checks, stage 4 DNS, stage 5 HTTP with the overall verdicts, and for DNS failures the RDAP registration check and the dangling-CNAME subdomain-takeover check" width="720">
 </p>
 
-The diagram is generated from [`docs/pipeline.d2`](docs/pipeline.d2) with
-[D2](https://d2lang.com/) v0.8:
+The diagram is monochrome so that it prints in greyscale. It is generated from
+[`docs/check_urls_flow.d2`](docs/check_urls_flow.d2) with [D2](https://d2lang.com/) v0.8:
 
 ```sh
-d2 --layout elk --pad 20 docs/pipeline.d2 docs/pipeline.svg
+cd docs
+d2 --layout elk --pad 16 --elk-nodeNodeBetweenLayers 28 --elk-edgeNodeBetweenLayers 14 \
+   check_urls_flow.d2 check_urls_flow.svg
 ```
 
 ### Stage 0 — Listing
@@ -222,9 +253,20 @@ the host part, or the hosting service ended). Independently, the name with `www.
 or removed is tried (`www_alt`). Resolved hosts whose addresses are all non-global
 (private, loopback, …) are flagged in `dns_note`.
 
+**Subdomain-takeover check.** When the hostname is NXDOMAIN but its registered domain still
+exists, its CNAME record is queried. If the CNAME points to a hosting service and the target
+itself is NXDOMAIN, the hostname is flagged as a *subdomain-takeover candidate* (`takeover`
+column): a third party could re-create the deleted resource at that service and serve content
+under the facility's hostname. Only this high-confidence pattern is flagged. The hosting
+services are listed in `TAKEOVER_SUFFIXES` in `check_urls.py` (adapted from the community
+catalogue *can-i-take-over-xyz*, plus Japanese hosts such as Sakura, Xserver and Lolipop).
+The check only observes DNS; no resource is ever claimed.
+
 ### Stage 5 — HTTP reachability
 
-Only URLs whose host resolved are requested. For each URL:
+Only URLs whose host resolved are requested, with at most `--per-ip` (default 2) concurrent
+connections per server: hostnames that resolve to the same set of addresses (e.g. many sites
+on one shared-hosting server) share that limit. For each URL:
 
 1. `HEAD`, following redirects. A status < 400 is accepted.
 2. Otherwise (status ≥ 400 or a connection error), `GET` with `stream=True`, following
@@ -239,6 +281,27 @@ the automated request. For these the WAF/CDN is guessed from response headers
 (Cloudflare, Akamai, CloudFront/AWS WAF, Imperva, Sucuri, Fastly, SiteGuard). No attempt
 is made to bypass such refusals. Any other status ≥ 400, timeout or connection error is
 **unreachable**.
+
+### Stage 6 — RDAP (registration status of domains absent from DNS)
+
+For each registered domain whose DNS status is *domain does not exist*, the registry is
+queried over [RDAP](https://about.rdap.org/) with `whoisit` to tell whether a third party could
+register it:
+
+| `rdap_status` | Meaning |
+|---|---|
+| `登録可能（RDAPで未登録）` | Registry returns 404: **available for registration** (domain takeover possible) |
+| `登録済み（削除/償還保留）` | Registered, in *pending delete* or *redemption period* |
+| `登録済み` | Still registered (the DNS is misconfigured); `rdap_detail` gives the expiry date |
+| `RDAP非対応TLD` | No RDAP endpoint in the IANA bootstrap (e.g. `.jp` and other ccTLDs); not queried |
+| `RDAP照会不可` | Error, or still rate-limited after 3 attempts |
+
+Only TLDs with an RDAP endpoint (in practice, gTLDs) can be checked. For `.jp` and other
+ccTLDs without one, the script does **not** fall back to port-43 WHOIS, whose terms restrict
+use to network administration. Rate-limited queries are retried with backoff. Secondary
+queries to registrar RDAP servers that fail are ignored, because the registry answer alone
+decides registered vs. available. This stage does not change the overall verdict; it is a
+secondary analysis of DNS failures. Use `--no-rdap` to skip it.
 
 ### Scheme completion (URLs listed without a scheme)
 
@@ -276,8 +339,9 @@ Each row receives the stage at which validation stopped:
 
 ## Output files
 
-All CSVs are UTF-8 with BOM (opens correctly in Excel). Category values are in Japanese;
-the tables above and `EN_MAP` in `plot_results.R` give the English equivalents.
+The row-level CSVs are UTF-8 with BOM (opens correctly in Excel). Their category values are
+in Japanese; the tables above and `EN_MAP` in `plot_results.R` give the English equivalents.
+`summary.csv` is plain ASCII without a BOM, with English column names and values.
 
 | File | Rows |
 |---|---|
@@ -288,7 +352,15 @@ the tables above and `EN_MAP` in `plot_results.R` give the English equivalents.
 | `access_denied_urls.csv` | 401 / 403 / 429, with the WAF/CDN guess |
 | `scheme_completion.csv` | Rows listed without a scheme, with the http/https verdict |
 | `hosts.csv` | DNS result per unique hostname |
-| `summary.csv` | Counts and percentages per file and in total (`Total`) |
+| `rdap_domains.csv` ⚠ | RDAP status per registered domain absent from DNS, with the number of listed URLs pointing to it |
+| `subdomain_takeover.csv` ⚠ | Rows whose hostname is a subdomain-takeover candidate |
+| `summary.csv` | Counts and percentages per file and in total (`Total`); the only output published here |
+
+⚠ **Not for publication.** `rdap_domains.csv` and `subdomain_takeover.csv` name domains and
+hostnames that a third party could take over today. They are not included in this repository
+or in the Zenodo archive, and only aggregate counts are published (in `summary.csv`). The
+row-level files also list such hosts and are not published either. `.gitignore` excludes the
+`results/` folder.
 
 ### Columns of the row-level CSVs
 
@@ -305,10 +377,12 @@ the tables above and `EN_MAP` in `plot_results.R` give the English equivalents.
 | `suffix`, `registered_domain` | Public suffix and registered domain (PSL) |
 | `dns_status` | Stage-4 verdict |
 | `domain_status` | For unresolved hosts: whether the registered domain exists (NS query) |
+| `takeover` | `サブドメインテイクオーバー候補(<provider>)` if the hostname is a subdomain-takeover candidate |
 | `www_alt` | Set if the name with `www.` added/removed resolves |
 | `dns_detail` | Raw resolver status: `OK`, `NXDOMAIN`, `NOANSWER`, `SERVFAIL`, `TIMEOUT`, `ERROR(…)` |
-| `a`, `aaaa`, `cname` | Addresses and CNAME target |
+| `a`, `aaaa`, `cname` | Addresses and CNAME target (for an unresolved host, the dangling CNAME if any) |
 | `dns_note` | Set if all addresses are non-global |
+| `rdap_status`, `rdap_detail` | Stage-6 result for the registered domain (only if it is absent from DNS) |
 | `scheme_http`, `scheme_https` | Result for each scheme (only when the scheme was missing) |
 | `scheme_correct`, `scheme_verdict`, `http_completion_ok` | Scheme completion verdict |
 | `reachable` | `True` if the final HTTP status was < 400 |
@@ -329,23 +403,33 @@ a percentage rounded to two decimals.
 | `total_rows` | all facilities in the file | – |
 | `url_listed`, `url_not_listed` | the URL field is non-empty / empty | `total_rows` (`…_pct_of_all_rows`) |
 | `evaluated_rows` | a URL is listed and was evaluated | – |
-| `url_syntax_ok` | no stage-1 problem | `evaluated_rows` |
+| `url_syntax_valid` | no stage-1 problem | `evaluated_rows` |
 | `url_syntax_repaired` | a stage-1 problem, but a usable URL after repair | `evaluated_rows` |
 | `url_syntax_unrecoverable` | no usable URL | `evaluated_rows` |
 | `scheme_missing`, `scheme_misspelled` | `scheme_state` is missing / misspelled | `evaluated_rows` |
-| `hostname_problem` | any stage 2–3 problem | `evaluated_rows` |
+| `hostname_syntax_issue` | any stage 2–3 problem | `evaluated_rows` |
 | `tld_nonexistent` | the TLD is not in the Public Suffix List | `evaluated_rows` |
 | `dns_resolved` | the hostname resolved | `evaluated_rows` |
 | `dns_domain_not_exist` | neither the hostname nor its registered domain exists | `evaluated_rows` |
 | `dns_domain_exists_hostname_not` | the registered domain exists, the hostname does not | `evaluated_rows` |
+| `subdomain_takeover_candidate` | the hostname is a subdomain-takeover candidate | `evaluated_rows` |
 | `dns_resolves_with_www_toggled` | adding/removing `www.` would resolve | `evaluated_rows` |
 | `http_reachable` | final HTTP status < 400 | `evaluated_rows` |
 | `http_access_denied` | 401 / 403 / 429 | `evaluated_rows` |
 | `http_responded` | reachable or access denied | `evaluated_rows` |
 | `http_unreachable` | DNS resolved but no HTTP response other than access denied | `evaluated_rows` |
-| `scheme_completion_http`, `scheme_completion_https` | scheme-less URL whose correct scheme is http / https | `evaluated_rows` |
-| `overall_ok` | `stage` is `OK` (no correction needed) | `evaluated_rows` |
+| `scheme_completion_http_correct`, `scheme_completion_https_correct` | scheme-less URL whose correct scheme is http / https | `evaluated_rows` |
+| `dns_absent_rdap_available` | the registered domain is absent from DNS and RDAP says it is available for registration | `evaluated_rows` |
+| `dns_absent_rdap_registered` | … and RDAP says it is still registered | `evaluated_rows` |
+| `dns_absent_rdap_pending_delete` | … and RDAP says pending delete / redemption | `evaluated_rows` |
+| `dns_absent_rdap_unsupported_tld` | … and the TLD has no RDAP endpoint (e.g. `.jp`) | `evaluated_rows` |
+| `dns_absent_rdap_error` | … and the RDAP query failed | `evaluated_rows` |
+| `overall_ok_no_correction` | `stage` is `OK` (no correction needed) | `evaluated_rows` |
 | `scheme_completion_https_pct_of_determined` | (percentage only) https correct | scheme-less URLs whose scheme could be determined |
+
+The `dns_absent_rdap_*` columns count listed URLs, not domains: a domain listed by several
+facilities is counted once per facility. The number of unique domains is printed at the end
+of the run.
 
 ---
 
@@ -383,12 +467,16 @@ verification:
 
 - The results reported in the paper were obtained on **2026-11-09** from a residential FTTH
   (fibre-to-the-home) connection in **Japan**, with Python 3.13, requests 2.34.2,
-  urlextract 1.10.0, dnspython 2.9.2 and tldextract 5.4.0. To reproduce with the same versions:
+  urlextract 1.10.0, dnspython 2.9.2, tldextract 5.4.0 and whoisit 4.1.0. To reproduce with
+  the same versions:
 
   ```sh
   uv run --python 3.13 --with requests==2.34.2 --with urlextract==1.10.0 \
-         --with dnspython==2.9.2 --with tldextract==5.4.0 check_urls.py --dir data --outdir results
+         --with dnspython==2.9.2 --with tldextract==5.4.0 --with whoisit==4.1.0 \
+         check_urls.py --dir data --outdir results
   ```
+- RDAP answers change as domains are registered, renewed or deleted, so the Stage-6 counts
+  depend on the date of the run even more than the DNS and HTTP results do.
 - The aggregated results used in the paper are published as [`summary.csv`](summary.csv)
   (CC BY 4.0, see [License](#license)).
 - `tldextract` downloads the current Public Suffix List on first use and caches it (falling
@@ -404,10 +492,16 @@ verification:
 - The client identifies itself honestly
   (`User-Agent: Mozilla/5.0 (compatible; url-reachability-check/1.0)`) and never impersonates
   a browser.
-- At most `--per-host` (default 2) concurrent connections per hostname; no automatic retries.
+- At most `--per-ip` (default 2) concurrent HTTP connections per server, counting all
+  hostnames that share its addresses, so shared-hosting servers are not overloaded; no
+  automatic retries.
 - Only the top-level resource of each listed URL is requested (`HEAD`, then a streamed `GET`
   whose body is not read). No crawling.
 - Access-denied responses (401/403/429) are recorded as such and never circumvented.
+- RDAP is queried with few workers (`--rdap-workers`, default 8) and backs off when rate-limited;
+  port-43 WHOIS is never used.
+- Takeover risks are only observed: no domain is registered and no hosting resource is claimed.
+  Lists of takeable domains and hostnames are not published (see [Output files](#output-files)).
 
 ---
 
@@ -422,6 +516,12 @@ verification:
 - The typo repairs are heuristic; each one is recorded so that its effect can be audited
   (`url_problems`, and the distinction between `OK` and `OK（要修正あり）`).
 - WAF/CDN identification is based on response headers only and is a guess.
+- RDAP covers only TLDs with an RDAP endpoint; for `.jp` and other ccTLDs without one,
+  whether an absent domain can be registered is not determined.
+- The subdomain-takeover check flags only a dangling CNAME to a listed hosting service whose
+  target is NXDOMAIN. Other takeover patterns (e.g. a target that still resolves but serves an
+  unclaimed resource, or dangling NS/MX records) are not detected, so the count is a lower
+  bound.
 
 ---
 
@@ -436,7 +536,8 @@ it is published. Until then, please cite the software (including `summary.csv`):
 This DOI always resolves to the latest version. Each release also has its own DOI; to cite
 the exact version you used, take it from the version list on the
 [Zenodo record](https://doi.org/10.5281/zenodo.24087179)
-(v1.0.0: [10.5281/zenodo.24087180](https://doi.org/10.5281/zenodo.24087180)).
+(v1.0.0: [10.5281/zenodo.24087180](https://doi.org/10.5281/zenodo.24087180);
+v1.0.1: [10.5281/zenodo.24087566](https://doi.org/10.5281/zenodo.24087566)).
 
 Citation metadata is in [`CITATION.cff`](CITATION.cff); GitHub's **"Cite this repository"**
 button generates APA and BibTeX from it.

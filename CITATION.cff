@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this software or summary.csv, please cite it as below."
 type: software
 title: "mhlw-opendata-url-checker: staged validation of website URLs in Japan's medical facility open data"
-version: 1.0.1
+version: 1.1.0
 date-released: "2026-11-10"
 authors:
   - family-names: Ma
@@ -15,6 +15,9 @@ identifiers:
   - type: doi
     value: "10.5281/zenodo.24087180"
     description: "Version 1.0.0"
+  - type: doi
+    value: "10.5281/zenodo.24087566"
+    description: "Version 1.0.1"
 repository-code: "https://github.com/TanukiMa/mhlw-opendata-url-checker"
 license: MIT
 abstract: >-
@@ -23,11 +26,15 @@ abstract: >-
   dental clinics, maternity homes and pharmacies in the Japan Medical Information Net
   open data (Ministry of Health, Labour and Welfare, release 2026-06-01). The share of
   URLs failing at each stage is used as a proxy for how well domain names and hostnames
-  are understood. Includes the figure script and the aggregated results (summary.csv,
-  CC BY 4.0).
+  are understood. For DNS failures, it also checks whether the registered domain is
+  available for registration (RDAP, gTLDs only) and whether the hostname is a
+  subdomain-takeover candidate (a dangling CNAME to a hosting provider). Includes the
+  figure script and the aggregated results (summary.csv, CC BY 4.0).
 keywords:
   - domain names
   - DNS
+  - RDAP
+  - subdomain takeover
   - URL validation
   - open data
   - medical facilities
