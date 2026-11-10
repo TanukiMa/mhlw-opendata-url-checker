@@ -23,7 +23,10 @@ and hostnames -- the "addresses" of the Internet -- are understood.
                         the registered domain
   Stage 4  DNS        : resolve A/AAAA with dnspython. On NXDOMAIN, also query NS of the
                         registered domain to tell "domain does not exist" from "only the
-                        hostname part is wrong". Also try adding/removing "www."
+                        hostname part is wrong". When the hostname is gone but the parent
+                        domain survives, query its CNAME: a dangling CNAME to a hosting
+                        provider whose target is itself NXDOMAIN is flagged as a subdomain-
+                        takeover candidate. Also try adding/removing "www."
   Stage 5  HTTP       : reachability with requests (only for hosts that resolved)
   Stage 6  RDAP        : for registered domains that are absent from DNS, query gTLD RDAP
                         (whoisit) to tell "available for registration" from "still
@@ -42,6 +45,8 @@ Output (--outdir):
   scheme_completion.csv  http/https verdict for URLs without a scheme
   rdap_domains.csv       RDAP registration status per DNS-absent registered domain
                          (NOT for publication: it identifies takeable domains)
+  subdomain_takeover.csv hostnames with a dangling CNAME to a claimable resource
+                         (NOT for publication: it identifies takeable subdomains)
   hosts.csv              DNS result per unique hostname
   summary.csv            per-file aggregates (counts and percentages); published, ASCII,
                          English column names, no BOM
@@ -58,11 +63,15 @@ Usage (uv provisions the dependencies from the PEP 723 metadata above):
 """
 import argparse
 import csv
+import io
 import ipaddress
+import os
 import re
 import sys
+import tempfile
 import threading
 import time
+import warnings
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlsplit
@@ -75,6 +84,37 @@ import urllib3
 import whoisit
 import whoisit.errors as rdap_err
 from urlextract import URLExtract
+
+
+def write_text(path, text, bom=True, retries=6):
+    """Write `text` to `path`, retrying transient filesystem failures.
+
+    The output folder is frequently a Google Drive virtual filesystem that intermittently
+    raises OSError (e.g. [Errno 22] Invalid argument / EINVAL) on open or write. Because this
+    script does all of its DNS and HTTP work in memory and writes only at the very end, one
+    such hiccup at the final step would otherwise discard a multi-hour run. We retry with a
+    short backoff, and if the destination keeps failing we save a copy to a local temp folder
+    and report its path so the measurement is never lost.
+    """
+    data = ("﻿" + text) if bom else text   # BOM byte-identical to utf-8-sig; added once
+    last = None
+    for attempt in range(retries):
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(data)
+            return path
+        except OSError as e:
+            last = e
+            time.sleep(1.5 * (attempt + 1))
+    fallback_dir = os.path.join(tempfile.gettempdir(), "check_urls_out")
+    os.makedirs(fallback_dir, exist_ok=True)
+    local = os.path.join(fallback_dir, os.path.basename(path))
+    with open(local, "w", encoding="utf-8", newline="") as f:
+        f.write(data)
+    print(f"  WARNING: could not write {path} after {retries} tries ({last!r}); "
+          f"saved to {local} instead -- copy it to the output folder manually.", file=sys.stderr)
+    return local
+
 
 # File name -> (facility type, URL column, name column). The ID column is "ID" in every file.
 # Values are the Japanese labels / column names used in the open data.
@@ -111,6 +151,7 @@ SUMMARY_COLS_EN = {
     "DNS 解決可": "dns_resolved",
     "DNS ドメインが存在しない": "dns_domain_not_exist",
     "DNS ドメインは有るがホスト名が無い": "dns_domain_exists_hostname_not",
+    "サブドメインテイクオーバー候補": "subdomain_takeover_candidate",
     "DNS www付け外しで解決可": "dns_resolves_with_www_toggled",
     "HTTP 到達可": "http_reachable",
     "HTTP 自動アクセス拒否(応答あり)": "http_access_denied",
@@ -151,6 +192,11 @@ HEADERS = {
 }
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# whoisit emits a QueryWarning when a secondary RDAP sub-query (the registrar's server,
+# followed from the registry record) 404s, rate-limits, or has a bad certificate. These
+# do not change the top-level verdict (the registry answer already decides registered vs.
+# available), so we silence them to keep the run log readable.
+warnings.filterwarnings("ignore", category=rdap_err.QueryWarning)
 _local = threading.local()
 
 
@@ -351,6 +397,43 @@ def to_ascii(host: str) -> str:
     return ".".join(lb.encode("idna").decode("ascii") for lb in host.split("."))
 
 
+# Hosting services where deleting a resource leaves the hostname's CNAME pointing at a
+# name that no longer resolves (NXDOMAIN). A third party can then re-create the resource
+# and serve content under the facility's hostname, inheriting the parent domain's trust
+# (subdomain takeover). Suffix set adapted from the community "can-i-take-over-xyz"
+# catalogue; used only to label a dangling CNAME. We observe; we never claim a resource.
+TAKEOVER_SUFFIXES = [
+    ("GitHub Pages", "github.io"),
+    ("Heroku", "herokuapp.com"), ("Heroku", "herokudns.com"), ("Heroku", "herokussl.com"),
+    ("Azure", "azurewebsites.net"), ("Azure", "cloudapp.net"), ("Azure", "cloudapp.azure.com"),
+    ("Azure", "trafficmanager.net"), ("Azure", "azureedge.net"), ("Azure", "blob.core.windows.net"),
+    ("AWS", "amazonaws.com"), ("AWS", "elasticbeanstalk.com"), ("AWS CloudFront", "cloudfront.net"),
+    ("Netlify", "netlify.app"), ("Netlify", "netlify.com"), ("Cloudflare Pages", "pages.dev"),
+    ("Firebase", "web.app"), ("Firebase", "firebaseapp.com"), ("Shopify", "myshopify.com"),
+    ("Surge", "surge.sh"), ("Bitbucket", "bitbucket.io"), ("Ghost", "ghost.io"),
+    ("WP Engine", "wpengine.com"), ("Read the Docs", "readthedocs.io"), ("Fastly", "fastly.net"),
+    ("Sakura", "sakura.ne.jp"), ("Xserver", "xsrv.jp"), ("Lolipop", "lolipop.jp"),
+]
+
+
+def takeover_provider(host: str) -> str:
+    """Return the hosting provider if the host is under a takeover-prone suffix, else ''."""
+    h = host.lower().rstrip(".")
+    for name, suf in TAKEOVER_SUFFIXES:
+        if h == suf or h.endswith("." + suf):
+            return name
+    return ""
+
+
+def cname_target(name: str) -> str:
+    """Return the CNAME target of a name (lowercased, no trailing dot), or '' if none."""
+    try:
+        ans = resolver().resolve(name, "CNAME")
+        return str(ans[0].target).rstrip(".").lower()
+    except Exception:                           # noqa: BLE001 (NXDOMAIN, NoAnswer, timeout, ...)
+        return ""
+
+
 def dns_check(host: str, reg: str):
     ascii_host = to_ascii(host)
     st, a, cname = q(ascii_host, "A")
@@ -361,7 +444,7 @@ def dns_check(host: str, reg: str):
         if st == "NOANSWER" and st6 == "OK":
             st = "OK"
     res = {"dns_status": "", "dns_detail": st, "a": " ".join(a), "aaaa": " ".join(aaaa),
-           "cname": cname, "domain_status": "", "www_alt": "", "dns_note": ""}
+           "cname": cname, "domain_status": "", "www_alt": "", "dns_note": "", "takeover": ""}
 
     if st == "OK":
         res["dns_status"] = "解決可"                              # resolved
@@ -394,6 +477,18 @@ def dns_check(host: str, reg: str):
             res["domain_status"] = "登録ドメインが存在しない（未登録/失効/綴り誤り）"
         if st == "NXDOMAIN" and res["domain_status"].startswith("登録ドメインが存在しない"):
             res["dns_status"] = "ドメインが存在しない"            # domain does not exist
+
+    # Subdomain-takeover check (high-confidence only): the hostname no longer resolves, but
+    # if it still carries a CNAME to a hosting provider whose target is itself NXDOMAIN, the
+    # resource can be re-claimed under this hostname. Only for the "parent exists, hostname
+    # gone" case; whole-domain loss is domain takeover, handled by RDAP. We only observe.
+    if st == "NXDOMAIN" and res["dns_status"] != "ドメインが存在しない":
+        tgt = cname_target(ascii_host)
+        if tgt:
+            res["cname"] = res["cname"] or tgt
+            prov = takeover_provider(tgt)
+            if prov and q(tgt, "A")[0] == "NXDOMAIN":
+                res["takeover"] = f"サブドメインテイクオーバー候補({prov})"   # dangling CNAME to a claimable resource
 
     alt = ascii_host[4:] if ascii_host.startswith("www.") else "www." + ascii_host
     if q(alt, "A")[0] == "OK":
@@ -735,7 +830,7 @@ def main():
     fields = ["file", "kind", "id", "name", "raw", "check_url", "stage",
               "url_problems", "scheme_state",
               "host", "host_problems", "suffix", "registered_domain",
-              "dns_status", "domain_status", "www_alt", "dns_detail", "a", "aaaa", "cname", "dns_note",
+              "dns_status", "domain_status", "takeover", "www_alt", "dns_detail", "a", "aaaa", "cname", "dns_note",
               "rdap_status", "rdap_detail",
               "scheme_http", "scheme_https", "scheme_correct", "scheme_verdict", "http_completion_ok",
               "reachable", "status", "final_url", "http_error", "cert_ok", "denied", "waf"]
@@ -743,10 +838,15 @@ def main():
     def w(name, fieldnames, data, bom=True):
         # The row-level CSVs keep Japanese category labels, so they use utf-8-sig (BOM) for
         # Excel. summary.csv is published, all-ASCII, and written without a BOM (bom=False).
-        with open(f"{args.outdir}/{name}", "w", encoding=("utf-8-sig" if bom else "utf-8"), newline="") as f:
-            wr = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            wr.writeheader()
-            wr.writerows(data)
+        # Build the file in memory first, then hand it to write_text, which retries: the
+        # output folder is often a Google Drive virtual filesystem that intermittently fails
+        # an open/write with OSError(EINVAL), and a single late failure must not discard a
+        # multi-hour run.
+        buf = io.StringIO()
+        wr = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+        wr.writeheader()
+        wr.writerows(data)
+        write_text(f"{args.outdir}/{name}", buf.getvalue(), bom)
 
     w("all_results.csv", fields, rows)
     w("invalid_urls.csv", fields, [r for r in rows if r["url_problems"]])
@@ -764,9 +864,12 @@ def main():
       [{"registered_domain": dom, "rdap_status": rdap_of.get(dom, ""),
         "rdap_detail": rdap_detail_of.get(dom, ""), "listed_urls": fac_of_domain.get(dom, 0)}
        for dom in absent_domains])
-    w("hosts.csv", ["host", "registered_domain", "dns_status", "domain_status", "www_alt",
+    w("hosts.csv", ["host", "registered_domain", "dns_status", "domain_status", "takeover", "www_alt",
                     "dns_detail", "a", "aaaa", "cname", "dns_note"],
       [{"host": h, "registered_domain": reg_of[h], **d} for h, d in dns_res.items()])
+    # Subdomain-takeover candidates (dangling CNAME to a claimable resource). NOT for
+    # publication: it identifies hostnames open to takeover.
+    w("subdomain_takeover.csv", fields, [r for r in rows if r.get("takeover")])
 
     # ---- Aggregates (one row per file, plus a grand-total row).
     # Built with Japanese keys and written to summary.csv with English column names
@@ -790,6 +893,7 @@ def main():
             c["DNS 解決可"] += r["dns_status"] == "解決可"                           # DNS resolved
             c["DNS ドメインが存在しない"] += r["dns_status"] == "ドメインが存在しない"   # domain does not exist
             c["DNS ドメインは有るがホスト名が無い"] += "ホスト名部分が無い" in (r.get("domain_status") or "")
+            c["サブドメインテイクオーバー候補"] += bool(r.get("takeover"))            # dangling CNAME to a claimable resource
             c["DNS www付け外しで解決可"] += bool(r.get("www_alt"))                   # resolves with www toggled
             c["HTTP 到達可"] += r.get("reachable") is True                          # reachable
             c["HTTP 自動アクセス拒否(応答あり)"] += bool(r.get("denied"))            # access denied
@@ -830,6 +934,14 @@ def main():
                 continue
             if k.endswith("率%"):
                 print(f"  {k[:-3]:<22} {s[k[:-3]]:>7}  ({v}%)", file=sys.stderr)
+
+    # ---- RDAP summary (unique DNS-absent registered domains)
+    if absent_domains:
+        rc = Counter(rdap_of.get(dom, "") for dom in absent_domains)
+        print(f"\n== RDAP: {len(absent_domains)} unique registered domains absent from DNS", file=sys.stderr)
+        for label in ("登録可能（RDAPで未登録）", "登録済み", "登録済み（削除/償還保留）",
+                      "RDAP非対応TLD", "RDAP照会不可"):
+            print(f"  {label:<22} {rc.get(label, 0):>6}", file=sys.stderr)
 
 
 if __name__ == "__main__":
